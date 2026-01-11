@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${SOURCE:-/srv/${NAME}/}"
+BACKUP_DIR="/srv/shared/backups/${NAME}/"
+EXCLUDE_PATH="/app/exclude"
+AWS_SECRET_ACCESS_KEY="${B2_APPLICATION_KEY}"
+AWS_ACCESS_KEY_ID="${B2_APPLICATION_KEY_ID}"
+RESTIC_REPO="s3:https://s3.us-west-001.backblazeb2.com/${B2_BUCKET}/restic/${NAME}"
+
+source ./logging
+
+redact () {
+  if [[ -n "$1" ]]
+  then
+    echo '[REDACTED]'
+  else
+    echo '[NOT SET]'
+  fi
+}
+
+start-timer () {
+  START_TIME=$(date +%s)
+}
+
+stop-timer () {
+  TIMER=$(($(date +%s) - START_TIME))
+  START_TIME=0
+}
+
+log-vars () {
+  log-debug "NAME: ${NAME}"
+  log-debug "SOURCE: ${SOURCE}"
+  log-debug "BACKUP_DIR: ${BACKUP_DIR}"
+  log-debug "B2_APPLICATION_KEY: $(redact "${B2_APPLICATION_KEY}")"
+  log-debug "B2_APPLICATION_KEY_ID: $(redact "${B2_APPLICATION_KEY_ID}")"
+  log-debug "B2_BUCKET: ${B2_BUCKET}"
+  log-debug "RESTIC_PASSWORD: $(redact "${RESTIC_PASSWORD}")"
+  if [[ ! -f "${EXCLUDE_PATH}" ]]
+  then
+    touch "${EXCLUDE_PATH}"
+  fi
+  EXCLUDE_CONTENT=$(cat "${EXCLUDE_PATH}")
+  log-debug "EXCLUDING:\n${EXCLUDE_CONTENT}"
+}
+
+check-vars () {
+  if [[ -z "${NAME}" ]]
+  then
+    log-warning "NAME must be set"
+    return 1
+  fi
+  if [[ -z "${B2_APPLICATION_KEY}" ]]
+  then
+    log-warning "B2_APPLICATION_KEY must be set"
+    return 1
+  fi
+  if [[ -z "${B2_APPLICATION_KEY_ID}" ]]
+  then
+    log-warning "B2_APPLICATION_KEY_ID must be set"
+    return 1
+  fi
+  if [[ -z "${B2_BUCKET}" ]]
+  then
+    log-warning "B2_BUCKET must be set"
+    return 1
+  fi
+  if [[ -z "${RESTIC_PASSWORD}" ]]
+  then
+    log-warning "RESTIC_PASSWORD must be set"
+    return 1
+  fi
+  if [[ "$SOURCE" != */ ]]
+  then
+    log-warning "SOURCE must end with a slash"
+    return 1
+  fi
+  if [[ ! -d "${SOURCE}" ]]
+  then
+    log-warning "${SOURCE} is not a directory"
+    return 1
+  fi
+  if [[ ! -d "${BACKUP_DIR}" ]]
+  then
+    log-warning "${BACKUP_DIR} is not a directory"
+    return 1
+  fi
+  FILE_COUNT=$(ls -1A "${SOURCE}" | wc -l)
+  if [[ "${FILE_COUNT}" -gt 0 ]]
+  then
+    log-debug "${SOURCE} contains ${FILE_COUNT} files or directories"
+    return 0
+  else
+    log-warning "${SOURCE} appears to be empty"
+    log-warning "Ensure the directory has permissions for user: $(id)"
+    log-warning "and add at least one file with: touch ${SOURCE}/.not-empty"
+    return 1
+  fi
+}
+
+backup-files () {
+  log-information "Backing up files"
+  start-timer
+  if ! rsync \
+      --rsync-path="sudo rsync" \
+      --archive \
+      --human-readable \
+      --compress \
+      --partial \
+      --info=progress2 \
+      --delete \
+      --exclude "*.db" \
+      --exclude "*.sqlite" \
+      --exclude "*.sqlite3" \
+      --exclude-from "${EXCLUDE_PATH}" \
+      --stats \
+      "${SOURCE}" \
+      "${BACKUP_DIR}"
+  then
+    log-error "Failed to backup files"
+    exit 1
+  fi
+  stop-timer
+  log-success "Backed up files (${TIMER}s)"
+}
+
+build-find-args () {
+  FIND_ARGS=()
+  while IFS= read -r pattern
+  do
+    if [[ -n "${pattern}" ]]
+    then
+      FIND_ARGS+=(-path "${SOURCE}${pattern}" -prune -o)
+    fi
+  done < "${EXCLUDE_PATH}"
+  FIND_ARGS+=(-type f \( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" \) -print)
+}
+
+backup-databases () {
+  log-information "Searching for sqlite databases"
+  start-timer
+  build-find-args
+  set +e
+  DATABASES=$(find "${SOURCE}" "${FIND_ARGS[@]}")
+  set -e
+  stop-timer
+  if [[ -n "${DATABASES}" ]]
+  then
+    DB_COUNT=$(echo "${DATABASES}" | wc -l)
+  else
+    DB_COUNT=0
+  fi
+  log-debug "Found ${DB_COUNT} sqlite databases (${TIMER}s)"
+
+  if [[ -z "${DATABASES}" ]]
+  then
+    log-information "No sqlite databases found"
+    return 0
+  fi
+
+  log-information "Exporting ${DB_COUNT} databases"
+  while IFS= read -r DB
+  do
+    TARGET_DB="${BACKUP_DIR}${DB#"${SOURCE}"}"
+    if ! quick-check-db
+    then
+      copy-db
+      continue
+    fi
+    if ! integrity-check-db
+    then
+      copy-db
+      continue
+    fi
+    log-debug "Exporting: ${DB}"
+    start-timer
+    log-trace "To: ${TARGET_DB}"
+    if ! create-db
+    then
+      copy-db
+      continue
+    fi
+    if ! dump-db
+    then
+      copy-db
+      continue
+    fi
+    if ! populate-db
+    then
+      copy-db
+      continue
+    fi
+  done <<< "${DATABASES}"
+
+  log-success "Backed up ${DB_COUNT} sqlite databases"
+}
+
+quick-check-db () {
+  log-debug "Quick checking: ${DB}"
+  start-timer
+  set +e
+  ERR=$(sqlite3 "${DB}" ".timeout 10000;" "PRAGMA quick_check" 2>&1)
+  set -e
+  if [[ "${ERR}" == "ok" ]]
+  then
+    stop-timer
+    log-debug "Checked (${TIMER}s): ${DB}"
+    return 0
+  else
+    stop-timer
+    log-warning "Failed quick check (${TIMER}s): ${DB}"
+    log-warning "${ERR}"
+    return 1
+  fi
+}
+
+integrity-check-db () {
+  log-debug "Integrity checking: ${DB}"
+  start-timer
+  set +e
+  ERR=$(sqlite3 "${DB}" ".timeout 10000;" "PRAGMA integrity_check" 2>&1)
+  set -e
+  if [[ "${ERR}" == "ok" ]]
+  then
+    stop-timer
+    log-debug "Checked (${TIMER}s): ${DB}"
+    return 0
+  else
+    stop-timer
+    log-warning "Failed integrity check (${TIMER}s): ${DB}"
+    log-warning "${ERR}"
+    return 1
+  fi
+}
+
+create-db () {
+  rm -f "${TARGET_DB}"
+  if sqlite3 "${TARGET_DB}" "VACUUM;"
+  then
+    return 0
+  else
+    log-warning "Failed to create empty database: ${TARGET_DB}"
+    return 1
+  fi
+}
+
+dump-db () {
+  TMP_DUMP=$(mktemp)
+  set +e
+  ERR=$(sqlite3 "${DB}" ".timeout 10000;" ".dump" > "${TMP_DUMP}" 2>&1)
+  set -e
+  if [[ -z "${ERR}" ]]
+  then
+      return 0
+  else
+    rm -f "${TMP_DUMP}"
+    stop-timer
+    log-warning "Failed to dump database (${TIMER}s): ${DB}"
+    log-warning "${ERR}"
+    return 1
+  fi
+}
+
+populate-db () {
+  set +e
+  ERR=$(sqlite3 "${TARGET_DB}" < "${TMP_DUMP}" 2>&1)
+  set -e
+  rm -f "${TMP_DUMP}"
+  if [[ -z "${ERR}" ]]
+  then
+    stop-timer
+    log-debug "Exported (${TIMER}s): ${DB}"
+    return 0
+  else
+    stop-timer
+    log-warning "Failed to populate database (${TIMER}s): ${DB}"
+    log-warning "${ERR}"
+    return 1
+  fi
+}
+
+copy-db () {
+  log-info "Attempting to copy instead"
+  if cp "${DB}" "${TARGET_DB}"
+  then
+    log-debug "Copied database: ${DB}"
+    return 0
+  else
+    log-error "Failed to copy database: ${DB}"
+    return 1
+  fi
+}
+
+restic-init () {
+  export AWS_SECRET_ACCESS_KEY
+  export AWS_ACCESS_KEY_ID
+  if restic snapshots --repo "${RESTIC_REPO}" >/dev/null 2>&1
+  then
+    log-debug "Restic repository exists"
+    return 0
+  fi
+  log-information "Creating restic repository"
+  start-timer
+  if restic init --repo "${RESTIC_REPO}"
+  then
+    stop-timer
+    log-success "Created restic repository (${TIMER}s)"
+    return 0
+  else
+    stop-timer
+    log-error "Failed to create restic repository (${TIMER}s)"
+    return 1
+  fi
+}
+
+restic-backup () {
+  log-information "Running restic backup"
+  start-timer
+  if restic backup --repo "${RESTIC_REPO}" --host "${NAME}" "${BACKUP_DIR}"
+  then
+    stop-timer
+    log-success "Backup complete (${TIMER}s)"
+    return 0
+  else
+    stop-timer
+    log-error "Backup failed (${TIMER}s)"
+    return 1
+  fi
+}
+
+restic-forget () {
+  log-information "Pruning old restic snapshots"
+  start-timer
+  if restic forget \
+      --repo "${RESTIC_REPO}" \
+      --keep-daily 7 \
+      --keep-weekly 4 \
+      --keep-monthly 12 \
+      --prune
+  then
+    stop-timer
+    log-success "Pruned old restic snapshots (${TIMER}s)"
+    return 0
+  else
+    stop-timer
+    log-error "Failed to prune restic snapshots (${TIMER}s)"
+    return 1
+  fi
+}
+
+restic-check () {
+  log-information "Verifying restic backup integrity"
+  start-timer
+  if restic check --repo "${RESTIC_REPO}"
+  then
+    stop-timer
+    log-success "Backup verified (${TIMER}s)"
+    return 0
+  else
+    stop-timer
+    log-error "Backup verification failed (${TIMER}s)"
+    return 1
+  fi
+}
+
+log-vars
+check-vars
+backup-files
+backup-databases
+restic-init
+restic-backup
+restic-forget
+restic-check
+

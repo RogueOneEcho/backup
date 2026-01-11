@@ -1,0 +1,177 @@
+name: On Push
+on:
+  push:
+env:
+  IMAGE: ghcr.io/rogueoneecho/backup
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - id: release
+      env:
+        GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      run: ${{ secrets.RELEASE_SCRIPT }}
+
+    - run: echo "# ${{ steps.release.outputs.version}}" >> $GITHUB_STEP_SUMMARY
+
+    - run: cat /tmp/release-notes.md >> $GITHUB_STEP_SUMMARY
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-notes.md
+        path: /tmp/release-notes.md
+
+  build:
+    if: needs.release.outputs.version != ''
+    strategy:
+      matrix:
+        include:
+        - runner: ubuntu-24.04
+          arch: amd
+        - runner: ubuntu-24.04-arm
+          arch: arm
+    runs-on: ${{ matrix.runner }}
+    needs:
+    - release
+    steps:
+
+    - uses: actions/checkout@v4
+
+    - uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: buildx-${{ matrix.arch }}-${{ github.sha }}
+        restore-keys: |
+          buildx-${{ matrix.arch }}-
+
+    - run: echo $GH_TOKEN | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - run: docker buildx create --use
+
+    - run: >
+        docker buildx build src
+        --platform "linux/${{ matrix.arch }}64"
+        --build-arg VERSION=${{ needs.release.outputs.version }}
+        --tag ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-${{ matrix.arch }}
+        --cache-from=type=local,src=/tmp/.buildx-cache
+        --cache-to=type=local,dest=/tmp/.buildx-cache-new,mode=max
+        --provenance false
+        --push
+
+    # Temp fix
+    # https://github.com/docker/build-push-action/issues/252
+    # https://github.com/moby/buildkit/issues/1896
+    - run: rm -rf /tmp/.buildx-cache
+    - run: mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+
+  git-tag:
+    runs-on: ubuntu-24.04
+    if: needs.release.outputs.version != '' && contains(needs.release.outputs.version, '-')
+    needs:
+    - release
+    - build
+    steps:
+
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: git config
+      run: ${{ secrets.GIT_CONFIG }}
+
+    - name: git tag
+      run: git tag "v${{ needs.release.outputs.version }}"
+
+    - name: git push
+      run: git push origin "v${{ needs.release.outputs.version }}"
+
+
+  github-release:
+    runs-on: ubuntu-24.04
+    if: needs.release.outputs.version != '' && contains(needs.release.outputs.version, '-') == false
+    needs:
+    - release
+    - build
+    steps:
+
+    - uses: actions/checkout@v4
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: release-notes.md
+
+    - name: gh release create
+      if: contains(needs.release.outputs.version, '-') == false
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >
+        gh release create
+        "v${{ needs.release.outputs.version }}"
+        --title "v${{ needs.release.outputs.version }}"
+        --notes-file release-notes.md
+        --target ${{ github.ref_name }}
+
+    - name: gh release create --prerelease
+      if: contains(needs.release.outputs.version, '-')
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >
+        gh release create
+        "v${{ needs.release.outputs.version }}"
+        --title "v${{ needs.release.outputs.version }}"
+        --notes-file release-notes.md
+        --target ${{ github.ref_name }}
+        --prerelease
+
+
+  push:
+    runs-on: ubuntu-24.04
+    needs:
+    - release
+    - build
+    steps:
+
+    - run: echo $GH_TOKEN | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - run: >
+        docker manifest create ${{ env.IMAGE }}:${{ needs.release.outputs.version }}
+        ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-amd
+        ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-arm
+
+    - run: docker manifest push ${{ env.IMAGE }}:${{ needs.release.outputs.version }}
+
+    - if: contains(needs.release.outputs.version, '-')
+      run: >
+        docker manifest create ${{ env.IMAGE }}:alpha
+        ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-amd
+        ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-arm
+
+    - if: contains(needs.release.outputs.version, '-')
+      run: docker manifest push ${{ env.IMAGE }}:alpha
+
+    - if: contains(needs.release.outputs.version, '-') == false
+      run: >
+        docker manifest create ${{ env.IMAGE }}:latest
+        ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-amd
+        ${{ env.IMAGE }}:${{ needs.release.outputs.version }}-arm
+
+    - if: contains(needs.release.outputs.version, '-') == false
+      run: docker manifest push ${{ env.IMAGE }}:latest

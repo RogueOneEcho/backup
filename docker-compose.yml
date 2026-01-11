@@ -1,0 +1,24 @@
+services:
+
+  backup-test:
+    container_name: backup-test
+    build: ./src
+    userns_mode: host
+    environment:
+      NAME: test
+      SOURCE: /srv/shared/tests/
+    env_file:
+    - .env
+    configs:
+    - source: backup_exclude
+      target: /app/exclude
+    volumes:
+    - /srv/shared/tests:/srv/shared/tests:ro
+    - /srv/shared/backups/test:/srv/shared/backups/test
+    - /srv/shared/backups/.restic-cache:/root/.cache/restic
+
+configs:
+  backup_exclude:
+    content: |
+      example-1
+      example-2.torrent

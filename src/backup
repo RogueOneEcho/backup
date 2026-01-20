@@ -333,6 +333,7 @@ restic-forget () {
   start-timer
   if restic forget \
       --repo "${RESTIC_REPO}" \
+      --keep-last 5 \
       --keep-daily 7 \
       --keep-weekly 4 \
       --keep-monthly 12 \

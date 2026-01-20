@@ -28,7 +28,7 @@ Docker container for backing up service data to Backblaze B2 using rsync and res
 ```yaml
 services:
   backup-myservice:
-    image: ghcr.io/rogueoneecho/backup:latest
+    image: ghcr.io/rogueoneecho/backup
     userns_mode: host
     environment:
       NAME: myservice

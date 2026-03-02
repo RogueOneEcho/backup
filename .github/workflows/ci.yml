@@ -1,0 +1,9 @@
+name: CI
+on: workflow_call
+jobs:
+  ci:
+    uses: RogueOneEcho/ci/.github/workflows/docker.yml@v1
+    with:
+      docker-image: rogueoneecho/backup
+      build-context: src
+    secrets: inherit

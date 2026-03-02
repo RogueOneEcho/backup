@@ -2,7 +2,7 @@ services:
 
   backup-test:
     container_name: backup-test
-    build: ./src
+    image: ghcr.io/rogueoneecho/backup
     userns_mode: host
     environment:
       NAME: test

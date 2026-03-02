@@ -1,73 +1,36 @@
-# Backup
+# <p style="text-align: center">backup</p>
 
-Docker container for backing up service data to Backblaze B2 using rsync and restic.
+<p align="center">
+  <a href="https://github.com/RogueOneEcho/backup/actions/workflows/ci-on-push.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/RogueOneEcho/backup/ci-on-push.yml"></a>
+  <a href="https://github.com/RogueOneEcho/backup/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/RogueOneEcho/backup"></a>
+  <a href="LICENSE.md"><img alt="License" src="https://img.shields.io/github/license/RogueOneEcho/backup"></a>
+</p>
+
+Backup service data to Backblaze B2 using rsync and restic.
+
+```bash
+docker pull ghcr.io/rogueoneecho/backup
+```
 
 ## Features
 
-- Syncs files using rsync with configurable exclusions
+- Syncs files with rsync and configurable exclusions
 - Exports SQLite databases safely with integrity checks
-- Uploads to Backblaze B2 using restic (encrypted, deduplicated)
-- Automatic retention policy (7 daily, 4 weekly, 12 monthly)
+- Uploads to Backblaze B2 via restic with encryption and deduplication
+- Automatic retention policy: 5 latest, 7 daily, 4 weekly, 12 monthly
 - Verifies backup integrity after each run
 
-## Environment Variables
+## Build
 
-| Variable | Description |
-|----------|-------------|
-| `NAME` | Backup name (used for restic host and repo path) |
-| `SOURCE` | Source directory to backup (default: `/srv/${NAME}/`) |
-| `B2_APPLICATION_KEY` | Backblaze B2 application key |
-| `B2_APPLICATION_KEY_ID` | Backblaze B2 application key ID |
-| `B2_BUCKET` | Backblaze B2 bucket name |
-| `RESTIC_PASSWORD` | Restic repository encryption password |
+- amd64 and arm64 images available on [GHCR](https://github.com/RogueOneEcho/backup/pkgs/container/backup)
+- Signed with [Cosign](https://github.com/sigstore/cosign) via keyless Sigstore OIDC
+- SBOM attestation in CycloneDX format
+- Vulnerability scanned with [Grype](https://github.com/anchore/grype)
 
 ## Usage
 
-### With Docker Compose
+See [docker-compose.yml](docker-compose.yml) for an example.
 
-```yaml
-services:
-  backup-myservice:
-    image: ghcr.io/rogueoneecho/backup
-    userns_mode: host
-    environment:
-      NAME: myservice
-    env_file:
-    - .env
-    configs:
-    - source: myservice_backup_exclude
-      target: /app/exclude
-    volumes:
-    - /srv/myservice:/srv/myservice:ro
-    - /srv/shared/backups/myservice:/srv/shared/backups/myservice
-    - /srv/shared/backups/.restic-cache:/root/.cache/restic
+## Releases and Changes
 
-configs:
-  myservice_backup_exclude:
-    content: |
-      cache
-      logs
-```
-
-### Running
-
-```bash
-docker compose run --rm backup-myservice
-```
-
-## Testing
-
-```bash
-docker compose run --rm backup-test
-```
-
-## Exclusions
-
-Create an exclusion file mounted at `/app/exclude`. Patterns match path components (not substrings).
-
-Example:
-```
-cache
-logs
-temp
-```
+Releases and a full changelog are available via [GitHub Releases](https://github.com/RogueOneEcho/backup/releases).

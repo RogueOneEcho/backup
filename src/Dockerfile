@@ -1,4 +1,5 @@
-FROM alpine
+ARG ALPINE_VERSION=3.23.3
+FROM alpine:${ALPINE_VERSION}
 RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
 RUN apk update
 RUN apk add --no-cache bash rsync sqlite b2-tools restic

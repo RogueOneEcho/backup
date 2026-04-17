@@ -1,4 +1,4 @@
-ARG ALPINE_VERSION=3.23.4
+ARG ALPINE_VERSION=3.22.4
 FROM alpine:${ALPINE_VERSION}
 RUN echo "https://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
 RUN apk update

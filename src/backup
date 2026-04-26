@@ -333,6 +333,8 @@ restic-forget () {
   start-timer
   if restic forget \
       --repo "${RESTIC_REPO}" \
+      --group-by paths \
+      --compact \
       --keep-last 5 \
       --keep-daily 7 \
       --keep-weekly 4 \

@@ -335,8 +335,7 @@ restic-forget () {
       --repo "${RESTIC_REPO}" \
       --group-by paths \
       --compact \
-      --keep-last 5 \
-      --keep-daily 7 \
+      --keep-within 14d \
       --keep-weekly 4 \
       --keep-monthly 12 \
       --prune

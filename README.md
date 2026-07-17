@@ -17,7 +17,7 @@ docker pull ghcr.io/rogueoneecho/backup
 - Syncs files with rsync and configurable exclusions
 - Exports SQLite databases safely with integrity checks
 - Uploads to Backblaze B2 via restic with encryption and deduplication
-- Automatic retention policy: 5 latest, 7 daily, 4 weekly, 12 monthly
+- Automatic retention policy: everything within 14 days, 4 weekly, 12 monthly
 - Verifies backup integrity after each run
 
 ## Build

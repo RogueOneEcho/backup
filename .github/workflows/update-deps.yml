@@ -51,7 +51,7 @@ jobs:
 
     - name: Summary
       run: |
-        cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+        cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
         ```yaml
         latest: ${{ steps.latest.outputs.version }}
         current: ${{ steps.current.outputs.version }}

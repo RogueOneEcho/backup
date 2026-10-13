@@ -19,6 +19,7 @@ docker pull ghcr.io/rogueoneecho/backup
 - Uploads to Backblaze B2 via restic with encryption and deduplication
 - Automatic retention policy: everything within 14 days, 4 weekly, 12 monthly
 - Verifies backup integrity after each run
+- Logs progress every 10 seconds; override with `RESTIC_PROGRESS_FPS` (updates per second)
 
 ## Build
 

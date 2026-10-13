@@ -249,7 +249,7 @@ create-db () {
 dump-db () {
   TMP_DUMP=$(mktemp)
   set +e
-  ERR=$(sqlite3 "${DB}" ".timeout 10000;" ".dump" > "${TMP_DUMP}" 2>&1)
+  ERR=$(sqlite3 "${DB}" ".timeout 10000;" ".dump" 2>&1 > "${TMP_DUMP}")
   set -e
   if [[ -z "${ERR}" ]]
   then

@@ -14,7 +14,6 @@ services:
       target: /app/exclude
     volumes:
     - /srv/shared/tests:/srv/shared/tests:ro
-    - /srv/shared/backups/test:/srv/shared/backups/test
     - /srv/shared/backups/.restic-cache:/root/.cache/restic
 
 configs:

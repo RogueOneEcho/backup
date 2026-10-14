@@ -2,12 +2,12 @@
 set -euo pipefail
 
 SOURCE="${SOURCE:-/srv/${NAME}/}"
-BACKUP_DIR="/srv/shared/backups/${NAME}/"
+STAGING_DIR="/app/sqlite/"
 EXCLUDE_PATH="/app/exclude"
 RESTIC_PROGRESS_FPS="${RESTIC_PROGRESS_FPS:-0.1}"
 AWS_SECRET_ACCESS_KEY="${B2_APPLICATION_KEY}"
 AWS_ACCESS_KEY_ID="${B2_APPLICATION_KEY_ID}"
-RESTIC_REPO="s3:https://s3.us-west-001.backblazeb2.com/${B2_BUCKET}/restic/${NAME}"
+RESTIC_REPO="${RESTIC_REPO:-s3:https://s3.us-west-001.backblazeb2.com/${B2_BUCKET}/restic/${NAME}}"
 
 source ./logging
 
@@ -32,7 +32,7 @@ stop-timer () {
 log-vars () {
   log-debug "NAME: ${NAME}"
   log-debug "SOURCE: ${SOURCE}"
-  log-debug "BACKUP_DIR: ${BACKUP_DIR}"
+  log-debug "STAGING_DIR: ${STAGING_DIR}"
   log-debug "B2_APPLICATION_KEY: $(redact "${B2_APPLICATION_KEY}")"
   log-debug "B2_APPLICATION_KEY_ID: $(redact "${B2_APPLICATION_KEY_ID}")"
   log-debug "B2_BUCKET: ${B2_BUCKET}"
@@ -46,10 +46,26 @@ log-vars () {
   log-debug "EXCLUDING:\n${EXCLUDE_CONTENT}"
 }
 
+read-excludes () {
+  EXCLUDES=()
+  while IFS= read -r PATTERN || [[ -n "${PATTERN}" ]]
+  do
+    if [[ -n "${PATTERN}" ]]
+    then
+      EXCLUDES+=("${PATTERN}")
+    fi
+  done < "${EXCLUDE_PATH}"
+}
+
 check-vars () {
   if [[ -z "${NAME}" ]]
   then
     log-warning "NAME must be set"
+    return 1
+  fi
+  if [[ "${NAME}" == */* || "${NAME}" == "." || "${NAME}" == ".." ]]
+  then
+    log-warning "NAME must not contain a slash or be . or .."
     return 1
   fi
   if [[ -z "${B2_APPLICATION_KEY}" ]]
@@ -72,19 +88,27 @@ check-vars () {
     log-warning "RESTIC_PASSWORD must be set"
     return 1
   fi
+  if [[ "$SOURCE" != /* ]]
+  then
+    log-warning "SOURCE must be an absolute path"
+    return 1
+  fi
   if [[ "$SOURCE" != */ ]]
   then
     log-warning "SOURCE must end with a slash"
     return 1
   fi
+  for PATTERN in "${EXCLUDES[@]}"
+  do
+    if [[ "${PATTERN}" == /* ]]
+    then
+      log-warning "Exclude ${PATTERN} must be relative to SOURCE"
+      return 1
+    fi
+  done
   if [[ ! -d "${SOURCE}" ]]
   then
     log-warning "${SOURCE} is not a directory"
-    return 1
-  fi
-  if [[ ! -d "${BACKUP_DIR}" ]]
-  then
-    log-warning "${BACKUP_DIR} is not a directory"
     return 1
   fi
   FILE_COUNT=$(ls -1A "${SOURCE}" | wc -l)
@@ -100,42 +124,39 @@ check-vars () {
   fi
 }
 
-backup-files () {
-  log-information "Backing up files"
-  start-timer
-  if ! rsync \
-      --rsync-path="sudo rsync" \
-      --archive \
-      --human-readable \
-      --compress \
-      --partial \
-      --info=progress2 \
-      --delete \
-      --exclude "*.db" \
-      --exclude "*.sqlite" \
-      --exclude "*.sqlite3" \
-      --exclude-from "${EXCLUDE_PATH}" \
-      --stats \
-      "${SOURCE}" \
-      "${BACKUP_DIR}"
+prepare-staging () {
+  if ! mkdir -p "${STAGING_DIR}"
   then
-    log-error "Failed to backup files"
+    log-error "Failed to create staging directory: ${STAGING_DIR}"
     exit 1
   fi
-  stop-timer
-  log-success "Backed up files (${TIMER}s)"
+  if [[ -n "$(ls -A "${STAGING_DIR}")" ]]
+  then
+    log-error "${STAGING_DIR} is not empty"
+    log-error "Run each backup in a new container, e.g. docker compose run --rm"
+    exit 1
+  fi
 }
 
 build-find-args () {
   FIND_ARGS=()
-  while IFS= read -r pattern
+  for PATTERN in "${EXCLUDES[@]}"
   do
-    if [[ -n "${pattern}" ]]
-    then
-      FIND_ARGS+=(-path "${SOURCE}${pattern}" -prune -o)
-    fi
-  done < "${EXCLUDE_PATH}"
+    FIND_ARGS+=(-path "${SOURCE}${PATTERN}" -prune -o)
+  done
   FIND_ARGS+=(-type f \( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" \) -print)
+}
+
+build-exclude-args () {
+  EXCLUDE_ARGS=()
+  for PATTERN in "*.db" "*.db-*" "*.sqlite" "*.sqlite-*" "*.sqlite3" "*.sqlite3-*"
+  do
+    EXCLUDE_ARGS+=(--exclude "${SOURCE}**/${PATTERN}")
+  done
+  for PATTERN in "${EXCLUDES[@]}"
+  do
+    EXCLUDE_ARGS+=(--exclude "${SOURCE}${PATTERN}")
+  done
 }
 
 backup-databases () {
@@ -163,7 +184,12 @@ backup-databases () {
   log-information "Exporting ${DB_COUNT} databases"
   while IFS= read -r DB
   do
-    TARGET_DB="${BACKUP_DIR}${DB#"${SOURCE}"}"
+    TARGET_DB="${STAGING_DIR}${DB#"${SOURCE}"}"
+    if ! mkdir -p "$(dirname "${TARGET_DB}")"
+    then
+      log-error "Failed to create directory for: ${TARGET_DB}"
+      exit 1
+    fi
     if ! quick-check-db
     then
       copy-db
@@ -177,17 +203,7 @@ backup-databases () {
     log-debug "Exporting: ${DB}"
     start-timer
     log-trace "To: ${TARGET_DB}"
-    if ! create-db
-    then
-      copy-db
-      continue
-    fi
-    if ! dump-db
-    then
-      copy-db
-      continue
-    fi
-    if ! populate-db
+    if ! export-db
     then
       copy-db
       continue
@@ -235,47 +251,20 @@ integrity-check-db () {
   fi
 }
 
-create-db () {
-  rm -f "${TARGET_DB}"
-  if sqlite3 "${TARGET_DB}" "VACUUM;"
-  then
-    return 0
-  else
-    log-warning "Failed to create empty database: ${TARGET_DB}"
-    return 1
-  fi
-}
-
-dump-db () {
-  TMP_DUMP=$(mktemp)
+export-db () {
+  TARGET_SQL="${TARGET_DB//\'/\'\'}"
   set +e
-  ERR=$(sqlite3 "${DB}" ".timeout 10000;" ".dump" 2>&1 > "${TMP_DUMP}")
+  ERR=$(sqlite3 "${DB}" ".timeout 10000;" "VACUUM INTO '${TARGET_SQL}'" 2>&1)
+  STATUS=$?
   set -e
-  if [[ -z "${ERR}" ]]
-  then
-      return 0
-  else
-    rm -f "${TMP_DUMP}"
-    stop-timer
-    log-warning "Failed to dump database (${TIMER}s): ${DB}"
-    log-warning "${ERR}"
-    return 1
-  fi
-}
-
-populate-db () {
-  set +e
-  ERR=$(sqlite3 "${TARGET_DB}" < "${TMP_DUMP}" 2>&1)
-  set -e
-  rm -f "${TMP_DUMP}"
-  if [[ -z "${ERR}" ]]
+  if [[ "${STATUS}" -eq 0 && -z "${ERR}" ]]
   then
     stop-timer
     log-debug "Exported (${TIMER}s): ${DB}"
     return 0
   else
     stop-timer
-    log-warning "Failed to populate database (${TIMER}s): ${DB}"
+    log-warning "Failed to export database (${TIMER}s): ${DB}"
     log-warning "${ERR}"
     return 1
   fi
@@ -319,7 +308,14 @@ restic-init () {
 restic-backup () {
   log-information "Running restic backup"
   start-timer
-  if restic backup --repo "${RESTIC_REPO}" --host "${NAME}" "${BACKUP_DIR}"
+  build-exclude-args
+  if restic backup \
+      --repo "${RESTIC_REPO}" \
+      --host "${NAME}" \
+      --group-by '' \
+      "${EXCLUDE_ARGS[@]}" \
+      "${SOURCE}" \
+      "${STAGING_DIR}"
   then
     stop-timer
     log-success "Backup complete (${TIMER}s)"
@@ -336,7 +332,7 @@ restic-forget () {
   start-timer
   if restic forget \
       --repo "${RESTIC_REPO}" \
-      --group-by paths \
+      --group-by '' \
       --compact \
       --keep-within 14d \
       --keep-weekly 4 \
@@ -369,8 +365,9 @@ restic-check () {
 }
 
 log-vars
+read-excludes
 check-vars
-backup-files
+prepare-staging
 backup-databases
 restic-init
 restic-backup

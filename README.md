@@ -6,7 +6,7 @@
   <a href="LICENSE.md"><img alt="License" src="https://img.shields.io/github/license/RogueOneEcho/backup"></a>
 </p>
 
-Backup service data to Backblaze B2 using rsync and restic.
+Backup service data to Backblaze B2 using restic.
 
 ```bash
 docker pull ghcr.io/rogueoneecho/backup
@@ -14,9 +14,9 @@ docker pull ghcr.io/rogueoneecho/backup
 
 ## Features
 
-- Syncs files with rsync and configurable exclusions
-- Exports SQLite databases safely with integrity checks
-- Uploads to Backblaze B2 via restic with encryption and deduplication
+- Backs up `SOURCE` (default `/srv/${NAME}/`) with configurable exclusions
+- Exports SQLite databases safely with integrity checks and `VACUUM INTO`
+- Uploads files and database exports as one snapshot to Backblaze B2 via restic with encryption and deduplication
 - Automatic retention policy: everything within 14 days, 4 weekly, 12 monthly
 - Verifies backup integrity after each run
 - Logs progress every 10 seconds; override with `RESTIC_PROGRESS_FPS` (updates per second)
@@ -31,6 +31,28 @@ docker pull ghcr.io/rogueoneecho/backup
 ## Usage
 
 See [docker-compose.yml](docker-compose.yml) for an example.
+
+### Exclusions
+
+Optional `/app/exclude` lists one pattern per line, relative to `SOURCE`:
+
+```
+example-1
+**/*.log
+```
+
+- Lines MUST NOT start with `/`
+- Use `**` to match at any depth
+- `**` patterns do not skip SQLite databases; databases are only skipped by patterns without `**`
+
+### Restore
+
+Stop the service, remove any leftover `-wal` and `-shm` files, then restore the files and the database exports over them:
+
+```bash
+restic restore latest:/srv/test --host test --target /srv/test
+restic restore latest:/app/sqlite --host test --target /srv/test
+```
 
 ## Releases and Changes
 

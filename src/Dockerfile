@@ -1,4 +1,4 @@
-ARG ALPINE_VERSION=3.24.2
+ARG ALPINE_VERSION=3.24.3
 FROM alpine:${ALPINE_VERSION}
 RUN apk add --no-cache bash sqlite restic
 WORKDIR /app
